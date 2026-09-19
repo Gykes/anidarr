@@ -215,5 +215,82 @@ namespace NzbDrone.Core.Test.MetadataSource
 
             Directory.Delete(tempDir, true);
         }
+
+        [Test]
+        public void should_parse_jsonl_format_and_extract_posters_and_thumbnails()
+        {
+            var jsonlPath = Path.GetTempFileName() + ".jsonl";
+            var jsonlContent = "{\"$schema\":\"https://example.com/schema.json\"}\n" +
+                               "{\"sources\":[\"https://anidb.net/anime/12345\"],\"title\":\"Test Series\",\"type\":\"TV\",\"picture\":\"https://cdn.myanimelist.net/images/anime/1/123.jpg\",\"thumbnail\":\"https://cdn.myanimelist.net/images/anime/1/123t.jpg\",\"status\":\"FINISHED\",\"tags\":[\"Action\"],\"animeSeason\":{\"year\":2024}}\n" +
+                               "{\"sources\":[\"https://anidb.net/anime/99999\"],\"title\":\"Thumb Only Series\",\"thumbnail\":\"https://cdn.myanimelist.net/images/anime/2/999t.jpg\",\"status\":\"ONGOING\"}";
+
+            File.WriteAllText(jsonlPath, jsonlContent);
+
+            var gzPath = Path.GetTempFileName();
+            using (var fileStream = new FileStream(gzPath, FileMode.Create))
+            using (var gzipStream = new GZipStream(fileStream, CompressionMode.Compress, true))
+            using (var writer = new StreamWriter(gzipStream, Encoding.UTF8))
+            {
+                writer.Write("12345|1|x-jat|Test Series\n");
+                writer.Write("99999|1|x-jat|Thumb Only Series\n");
+            }
+
+            var insertedTitles = new List<AnimeOfflineTitle>();
+            _titleRepositoryMock.Setup(c => c.InsertMany(It.IsAny<IList<AnimeOfflineTitle>>()))
+                .Callback<IList<AnimeOfflineTitle>>(t => insertedTitles.AddRange(t));
+
+            Subject.ParseAndSyncDumps(jsonlPath, gzPath);
+
+            insertedTitles.Should().HaveCount(2);
+
+            var first = insertedTitles.Find(t => t.AniDbId == 12345);
+            first.Should().NotBeNull();
+            first.Title.Should().Be("Test Series");
+            first.PictureUrl.Should().Be("https://cdn.myanimelist.net/images/anime/1/123.jpg");
+            first.Year.Should().Be(2024);
+            first.Status.Should().Be(SeriesStatusType.Ended);
+            first.Genres.Should().Contain("Action");
+
+            var second = insertedTitles.Find(t => t.AniDbId == 99999);
+            second.Should().NotBeNull();
+            second.PictureUrl.Should().Be("https://cdn.myanimelist.net/images/anime/2/999t.jpg");
+            second.Status.Should().Be(SeriesStatusType.Continuing);
+
+            File.Delete(jsonlPath);
+            File.Delete(gzPath);
+        }
+
+        [Test]
+        public void should_link_unlinked_jsonl_entries_when_official_anidb_title_matches()
+        {
+            var jsonlPath = Path.GetTempFileName() + ".jsonl";
+            var jsonlContent = "{\"$schema\":\"https://example.com/schema.json\"}\n" +
+                               "{\"sources\":[\"https://myanimelist.net/anime/62328\",\"https://anisearch.com/anime/20918\"],\"title\":\"Sister Breeder\",\"synonyms\":[\"OVA Sister Breeder\",\"シスターブリーダー\"],\"picture\":\"https://cdn.myanimelist.net/images/anime/1790/151647.jpg\",\"thumbnail\":\"https://cdn.myanimelist.net/images/anime/1790/151647t.jpg\",\"status\":\"ONGOING\"}";
+
+            File.WriteAllText(jsonlPath, jsonlContent);
+
+            var gzPath = Path.GetTempFileName();
+            using (var fileStream = new FileStream(gzPath, FileMode.Create))
+            using (var gzipStream = new GZipStream(fileStream, CompressionMode.Compress, true))
+            using (var writer = new StreamWriter(gzipStream, Encoding.UTF8))
+            {
+                writer.Write("19514|1|x-jat|OVA Sister Breeder\n");
+            }
+
+            var insertedTitles = new List<AnimeOfflineTitle>();
+            _titleRepositoryMock.Setup(c => c.InsertMany(It.IsAny<IList<AnimeOfflineTitle>>()))
+                .Callback<IList<AnimeOfflineTitle>>(t => insertedTitles.AddRange(t));
+
+            Subject.ParseAndSyncDumps(jsonlPath, gzPath);
+
+            insertedTitles.Should().HaveCount(1);
+            var matched = insertedTitles[0];
+            matched.AniDbId.Should().Be(19514);
+            matched.MalId.Should().Be(62328);
+            matched.PictureUrl.Should().Be("https://cdn.myanimelist.net/images/anime/1790/151647.jpg");
+
+            File.Delete(jsonlPath);
+            File.Delete(gzPath);
+        }
     }
 }

@@ -85,7 +85,7 @@ namespace Sonarr.Api.V3.Series
 
                 if (poster != null)
                 {
-                    resource.RemotePoster = poster.RemoteUrl;
+                    resource.RemotePoster = string.IsNullOrWhiteSpace(poster.RemoteUrl) ? poster.Url : poster.RemoteUrl;
                 }
 
                 resource.Folder = _fileNameBuilder.GetSeriesFolder(currentSeries);

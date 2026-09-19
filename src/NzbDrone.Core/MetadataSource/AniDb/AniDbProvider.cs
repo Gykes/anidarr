@@ -972,7 +972,7 @@ namespace NzbDrone.Core.MetadataSource.AniDb
             }
         }
 
-        private static Series MapSeries(XElement root, int aniDbId)
+        private Series MapSeries(XElement root, int aniDbId)
         {
             var ns = root?.Name.Namespace ?? XNamespace.None;
 
@@ -1046,6 +1046,25 @@ namespace NzbDrone.Core.MetadataSource.AniDb
                 {
                     new MediaCover.MediaCover(MediaCoverTypes.Poster, $"https://cdn.anidb.net/images/main/{posterUrl}")
                 };
+            }
+            else
+            {
+                var offlineTitle = _titleSearch?.GetSeriesById("anidb", aniDbId);
+                if (!string.IsNullOrWhiteSpace(offlineTitle?.PictureUrl))
+                {
+                    series.Images = new List<MediaCover.MediaCover>
+                    {
+                        new MediaCover.MediaCover(MediaCoverTypes.Poster, offlineTitle.PictureUrl)
+                    };
+                }
+                else
+                {
+                    var fallbackMatch = _titleSearch?.Search(title, "anidb")?.FirstOrDefault(s => s.Images != null && s.Images.Any());
+                    if (fallbackMatch?.Images != null && fallbackMatch.Images.Any())
+                    {
+                        series.Images = fallbackMatch.Images;
+                    }
+                }
             }
 
             return series;

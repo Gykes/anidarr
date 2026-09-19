@@ -16,6 +16,7 @@ namespace NzbDrone.Core.MetadataSource
         AnimeOfflineTitle FindByMalId(int malId);
         AnimeOfflineTitle FindByAniListId(int anilistId);
         int GetUnpopulatedRomajiCount();
+        int GetPopulatedPictureCount();
         void ClearFuzzyCache();
     }
 
@@ -227,6 +228,14 @@ namespace NzbDrone.Core.MetadataSource
             using (var conn = _database.OpenConnection())
             {
                 return conn.ExecuteScalar<int>($"SELECT COUNT(*) FROM \"{_table}\" WHERE RomajiTitle IS NULL");
+            }
+        }
+
+        public int GetPopulatedPictureCount()
+        {
+            using (var conn = _database.OpenConnection())
+            {
+                return conn.ExecuteScalar<int>($"SELECT COUNT(*) FROM \"{_table}\" WHERE PictureUrl IS NOT NULL AND PictureUrl != ''");
             }
         }
     }

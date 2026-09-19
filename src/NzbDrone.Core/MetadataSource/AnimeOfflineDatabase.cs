@@ -10,7 +10,9 @@ using NzbDrone.Common.EnvironmentInfo;
 using NzbDrone.Common.Extensions;
 using NzbDrone.Common.Http;
 using NzbDrone.Core.IndexerSearch.Definitions;
+using NzbDrone.Core.Lifecycle;
 using NzbDrone.Core.MediaCover;
+using NzbDrone.Core.Messaging.Events;
 using NzbDrone.Core.Parser;
 using NzbDrone.Core.Tv;
 
@@ -26,9 +28,9 @@ namespace NzbDrone.Core.MetadataSource
         void BackfillFromCachedAniDbXml();
     }
 
-    public class AnimeOfflineDatabase : IAnimeOfflineDatabase
+    public class AnimeOfflineDatabase : IAnimeOfflineDatabase, IHandleAsync<ApplicationStartedEvent>
     {
-        private const string DumpUrl = "https://github.com/manami-project/anime-offline-database/releases/latest/download/anime-offline-database-minified.json";
+        private const string DumpUrl = "https://github.com/cedya77/anime-offline-database/releases/latest/download/anime-offline-database.jsonl";
         private const string OfficialDumpUrl = "https://anidb.net/api/anime-titles.dat.gz";
 
         private readonly IHttpClient _httpClient;
@@ -239,6 +241,18 @@ namespace NzbDrone.Core.MetadataSource
             return results.GroupBy(s => s.TitleSlug + "-" + s.Year).Select(g => g.First()).ToList();
         }
 
+        public void HandleAsync(ApplicationStartedEvent message)
+        {
+            try
+            {
+                EnsureCache();
+            }
+            catch (Exception ex)
+            {
+                _logger.Warn(ex, "Background AnimeOfflineDatabase cache check failed on startup");
+            }
+        }
+
         private static readonly object _ensureCacheLock = new object();
         private static volatile bool _cacheChecked;
 
@@ -256,23 +270,81 @@ namespace NzbDrone.Core.MetadataSource
                     return;
                 }
 
-                if (_animeOfflineTitleRepository.HasItems())
+                var syncMarker = Path.Combine(_appFolderInfo.AppDataFolder, "anime-offline-db.v18.synced");
+                var datPath = Path.Combine(_appFolderInfo.AppDataFolder, "anime-offline-database.jsonl");
+
+                // If items already exist, jsonl exists on disk, v18 unlinked sync marker exists, and picture URLs are populated:
+                if (_animeOfflineTitleRepository.HasItems() &&
+                    File.Exists(datPath) &&
+                    File.Exists(syncMarker) &&
+                    _animeOfflineTitleRepository.GetPopulatedPictureCount() > 500)
                 {
                     _cacheChecked = true;
                     return;
                 }
 
                 ForceDownloadDump();
+                try
+                {
+                    File.WriteAllText(syncMarker, DateTime.UtcNow.ToString("o"));
+                }
+                catch (Exception ex)
+                {
+                    _logger.Debug(ex, "Failed to write anime-offline-db sync marker");
+                }
+
                 _cacheChecked = true;
             }
         }
 
         public void ForceDownloadDump()
         {
-            var datPath = Path.Combine(_appFolderInfo.AppDataFolder, "anidb_titles.json");
+            var datPath = Path.Combine(_appFolderInfo.AppDataFolder, "anime-offline-database.jsonl");
+            var legacyDatPath = Path.Combine(_appFolderInfo.AppDataFolder, "anidb_titles.json");
             var officialDatPath = Path.Combine(_appFolderInfo.AppDataFolder, "anime-titles.dat.gz");
 
-            // ponytail: skip re-download if both files are fresh (< 24h old)
+            // Check if user or docker volume mounted/placed anime-offline-database.jsonl in AppDataFolder, workspace, or parent directories
+            if (!File.Exists(datPath))
+            {
+                var candidateLocations = new List<string>
+                {
+                    Path.Combine(Directory.GetCurrentDirectory(), "anime-offline-database.jsonl"),
+                    Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "anime-offline-database.jsonl"),
+                    Path.Combine(_appFolderInfo.AppDataFolder, "..", "anime-offline-database.jsonl")
+                };
+
+                var envPath = Environment.GetEnvironmentVariable("ANIDARR_OFFLINE_DB_PATH");
+                if (!string.IsNullOrWhiteSpace(envPath))
+                {
+                    candidateLocations.Insert(0, envPath);
+                }
+
+                // Check parent directories up to 3 levels (e.g. repo root when running from bin or test folders)
+                var currentDir = new DirectoryInfo(Directory.GetCurrentDirectory());
+                for (var p = currentDir.Parent; p != null; p = p.Parent)
+                {
+                    candidateLocations.Add(Path.Combine(p.FullName, "anime-offline-database.jsonl"));
+                }
+
+                foreach (var loc in candidateLocations)
+                {
+                    if (File.Exists(loc))
+                    {
+                        try
+                        {
+                            File.Copy(loc, datPath, true);
+                            _logger.Info("Copied local anime-offline-database.jsonl from {0} to {1}", loc, datPath);
+                            break;
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.Warn(ex, "Failed to copy local anime-offline-database.jsonl from {0}", loc);
+                        }
+                    }
+                }
+            }
+
+            // ponytail: skip re-download if the new jsonl dump file exists and both files are fresh (< 24h old)
             if (File.Exists(datPath) && File.Exists(officialDatPath) &&
                 File.GetLastWriteTimeUtc(datPath) > DateTime.UtcNow.AddHours(-24) &&
                 File.GetLastWriteTimeUtc(officialDatPath) > DateTime.UtcNow.AddHours(-24))
@@ -285,7 +357,22 @@ namespace NzbDrone.Core.MetadataSource
             DownloadDump(DumpUrl, datPath);
             DownloadDump(OfficialDumpUrl, officialDatPath);
 
-            ParseAndSyncDumps(datPath, officialDatPath);
+            var chosenDump = File.Exists(datPath) ? datPath : (File.Exists(legacyDatPath) ? legacyDatPath : datPath);
+            ParseAndSyncDumps(chosenDump, officialDatPath);
+
+            // Clean up legacy monolithic anidb_titles.json if anime-offline-database.jsonl is present
+            if (File.Exists(datPath) && File.Exists(legacyDatPath))
+            {
+                try
+                {
+                    File.Delete(legacyDatPath);
+                    _logger.Info("Removed legacy anidb_titles.json now that anime-offline-database.jsonl is active.");
+                }
+                catch (Exception ex)
+                {
+                    _logger.Debug(ex, "Failed to remove legacy anidb_titles.json");
+                }
+            }
         }
 
         private void DownloadDump(string url, string targetPath)
@@ -296,6 +383,7 @@ namespace NzbDrone.Core.MetadataSource
             {
                 var request = new HttpRequest(url);
                 request.AllowAutoRedirect = true;
+                request.RequestTimeout = TimeSpan.FromMinutes(5);
                 request.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
                 request.Headers.Add("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8");
                 request.Headers.Add("Accept-Language", "en-US,en;q=0.9");
@@ -312,158 +400,66 @@ namespace NzbDrone.Core.MetadataSource
 
         internal void ParseAndSyncDumps(string jsonPath, string officialDatPath)
         {
-            _logger.Info("Syncing Anime Offline Titles to database...");
+            _logger.Info("Syncing Anime Offline Titles to database from {0}...", jsonPath);
 
             var existingTitles = _animeOfflineTitleRepository.All().ToDictionary(t => t.AniDbId ?? -1, t => t);
             existingTitles.Remove(-1);
 
             var manamiDict = new Dictionary<int, AnimeOfflineTitle>();
+            var unlinkedTitles = new Dictionary<string, AnimeOfflineTitle>();
             var titlePriorities = new Dictionary<int, int>();
             var newTitles = new List<AnimeOfflineTitle>();
             var updatedTitles = new List<AnimeOfflineTitle>();
 
-            // 1. Parse Manami JSON
+            // 1. Parse JSONL (cedya77) or legacy JSON (manami)
             if (File.Exists(jsonPath))
             {
                 try
                 {
                     using (var stream = File.OpenRead(jsonPath))
-                    using (var document = JsonDocument.Parse(stream))
+                    using (var reader = new StreamReader(stream))
                     {
-                        var data = document.RootElement.GetProperty("data");
-                        foreach (var item in data.EnumerateArray())
+                        var firstLine = reader.ReadLine();
+                        var isJsonLines = jsonPath.EndsWith(".jsonl", StringComparison.OrdinalIgnoreCase) ||
+                                          (firstLine != null && (firstLine.TrimStart().StartsWith("{\"$schema\"", StringComparison.OrdinalIgnoreCase) ||
+                                                                 firstLine.TrimStart().StartsWith("{\"sources\"", StringComparison.OrdinalIgnoreCase)));
+
+                        if (isJsonLines)
                         {
-                            if (!item.TryGetProperty("sources", out var sourcesProp))
+                            var currentLine = firstLine;
+                            while (currentLine != null)
                             {
-                                continue;
-                            }
-
-                            var entry = new AnimeOfflineTitle();
-
-                            foreach (var source in sourcesProp.EnumerateArray())
-                            {
-                                var url = source.GetString();
-                                if (url != null)
+                                if (!string.IsNullOrWhiteSpace(currentLine) && !currentLine.TrimStart().StartsWith("{\"$schema\"", StringComparison.OrdinalIgnoreCase))
                                 {
-                                    if (url.StartsWith("https://anidb.net/anime/"))
+                                    using (var doc = JsonDocument.Parse(currentLine))
                                     {
-                                        if (int.TryParse(url.AsSpan("https://anidb.net/anime/".Length), out var id))
-                                        {
-                                            entry.AniDbId = id;
-                                        }
-                                    }
-                                    else if (url.StartsWith("https://myanimelist.net/anime/"))
-                                    {
-                                        if (int.TryParse(url.AsSpan("https://myanimelist.net/anime/".Length), out var id))
-                                        {
-                                            entry.MalId = id;
-                                        }
-                                    }
-                                    else if (url.StartsWith("https://anilist.co/anime/"))
-                                    {
-                                        if (int.TryParse(url.AsSpan("https://anilist.co/anime/".Length), out var id))
-                                        {
-                                            entry.AniListId = id;
-                                        }
+                                        ParseJsonItem(doc.RootElement, manamiDict, unlinkedTitles, titlePriorities);
                                     }
                                 }
-                            }
 
-                            if (!entry.AniDbId.HasValue && !entry.MalId.HasValue && !entry.AniListId.HasValue)
-                            {
-                                continue;
+                                currentLine = reader.ReadLine();
                             }
-
-                            // title
-                            if (item.TryGetProperty("title", out var titleProp) && titleProp.ValueKind == JsonValueKind.String)
+                        }
+                        else
+                        {
+                            // Legacy JSON format: {"data": [...]}
+                            stream.Position = 0;
+                            using (var document = JsonDocument.Parse(stream))
                             {
-                                entry.Title = titleProp.GetString();
-                                if (entry.Title != null)
+                                if (document.RootElement.TryGetProperty("data", out var dataProp))
                                 {
-                                    entry.CleanTitle = entry.Title.CleanForSearch();
-                                }
-                            }
-
-                            // synonyms
-                            if (item.TryGetProperty("synonyms", out var synProp) && synProp.ValueKind == JsonValueKind.Array)
-                            {
-                                foreach (var synElement in synProp.EnumerateArray())
-                                {
-                                    if (synElement.ValueKind == JsonValueKind.String)
+                                    foreach (var item in dataProp.EnumerateArray())
                                     {
-                                        var syn = synElement.GetString();
-                                        if (syn != null && !SearchCriteriaBase.IsSpacelessSlug(syn))
-                                        {
-                                            entry.SearchSynonyms.Add(syn);
-                                        }
+                                        ParseJsonItem(item, manamiDict, unlinkedTitles, titlePriorities);
                                     }
                                 }
-                            }
-
-                            // picture
-                            if (item.TryGetProperty("picture", out var picProp) && picProp.ValueKind == JsonValueKind.String)
-                            {
-                                entry.PictureUrl = picProp.GetString();
-                            }
-
-                            // year
-                            if (item.TryGetProperty("animeSeason", out var seasonProp) && seasonProp.ValueKind == JsonValueKind.Object)
-                            {
-                                if (seasonProp.TryGetProperty("year", out var yearProp) && yearProp.ValueKind == JsonValueKind.Number)
-                                {
-                                    entry.Year = yearProp.GetInt32();
-                                }
-                            }
-
-                            // genres
-                            if (item.TryGetProperty("tags", out var tagsProp) && tagsProp.ValueKind == JsonValueKind.Array)
-                            {
-                                foreach (var tag in tagsProp.EnumerateArray())
-                                {
-                                    if (tag.ValueKind == JsonValueKind.String)
-                                    {
-                                        entry.Genres.Add(tag.GetString());
-                                    }
-                                }
-                            }
-
-                            // status
-                            if (item.TryGetProperty("status", out var statusProp) && statusProp.ValueKind == JsonValueKind.String)
-                            {
-                                var statusStr = statusProp.GetString();
-                                if (statusStr == "FINISHED")
-                                {
-                                    entry.Status = SeriesStatusType.Ended;
-                                }
-                                else if (statusStr == "ONGOING")
-                                {
-                                    entry.Status = SeriesStatusType.Continuing;
-                                }
-                                else if (statusStr == "UPCOMING")
-                                {
-                                    entry.Status = SeriesStatusType.Upcoming;
-                                }
-                                else
-                                {
-                                    entry.Status = SeriesStatusType.Continuing;
-                                }
-                            }
-                            else
-                            {
-                                entry.Status = SeriesStatusType.Continuing;
-                            }
-
-                            if (entry.AniDbId.HasValue && !manamiDict.ContainsKey(entry.AniDbId.Value))
-                            {
-                                manamiDict[entry.AniDbId.Value] = entry;
-                                titlePriorities[entry.AniDbId.Value] = 2; // Default Manami priority (equivalent to Romaji/English mix)
                             }
                         }
                     }
                 }
                 catch (Exception ex)
                 {
-                    _logger.Error(ex, "Failed to parse manami anime-offline-database.");
+                    _logger.Error(ex, "Failed to parse anime-offline-database.");
                 }
             }
 
@@ -515,6 +511,62 @@ namespace NzbDrone.Core.MetadataSource
                                 };
                                 manamiDict[anidbId] = entry;
                                 titlePriorities[anidbId] = -1;
+                            }
+
+                            if (string.IsNullOrWhiteSpace(entry.PictureUrl) && cleanTitlePart.Length >= 4 && unlinkedTitles.TryGetValue(cleanTitlePart, out var matchedUnlinked))
+                            {
+                                entry.PictureUrl = matchedUnlinked.PictureUrl;
+
+                                if (entry.MalId == null || entry.MalId <= 0)
+                                {
+                                    entry.MalId = matchedUnlinked.MalId;
+                                }
+
+                                if (entry.AniListId == null || entry.AniListId <= 0)
+                                {
+                                    entry.AniListId = matchedUnlinked.AniListId;
+                                }
+
+                                if (entry.Year == 0)
+                                {
+                                    entry.Year = matchedUnlinked.Year;
+                                }
+
+                                if (entry.Genres == null || !entry.Genres.Any())
+                                {
+                                    entry.Genres = matchedUnlinked.Genres;
+                                }
+
+                                if (string.IsNullOrWhiteSpace(entry.Overview))
+                                {
+                                    entry.Overview = matchedUnlinked.Overview;
+                                }
+
+                                if (entry.Status == null || entry.Status == SeriesStatusType.Continuing)
+                                {
+                                    entry.Status = matchedUnlinked.Status;
+                                }
+
+                                if (string.IsNullOrWhiteSpace(entry.EnglishTitle) && !string.IsNullOrWhiteSpace(matchedUnlinked.EnglishTitle))
+                                {
+                                    entry.EnglishTitle = matchedUnlinked.EnglishTitle;
+                                }
+
+                                if (string.IsNullOrWhiteSpace(entry.RomajiTitle) && !string.IsNullOrWhiteSpace(matchedUnlinked.RomajiTitle))
+                                {
+                                    entry.RomajiTitle = matchedUnlinked.RomajiTitle;
+                                }
+
+                                if (matchedUnlinked.SearchSynonyms != null)
+                                {
+                                    foreach (var s in matchedUnlinked.SearchSynonyms)
+                                    {
+                                        if (!entry.SearchSynonyms.Contains(s))
+                                        {
+                                            entry.SearchSynonyms.Add(s);
+                                        }
+                                    }
+                                }
                             }
 
                             var priority = 0;
@@ -704,6 +756,159 @@ namespace NzbDrone.Core.MetadataSource
             BackfillFromCachedAniDbXml();
 
             _logger.Info("Finished syncing Anime Offline Titles database.");
+        }
+
+        private static void ParseJsonItem(JsonElement item, Dictionary<int, AnimeOfflineTitle> titleDict, Dictionary<string, AnimeOfflineTitle> unlinkedTitles, Dictionary<int, int> titlePriorities)
+        {
+            if (!item.TryGetProperty("sources", out var sourcesProp))
+            {
+                return;
+            }
+
+            var entry = new AnimeOfflineTitle();
+
+            foreach (var source in sourcesProp.EnumerateArray())
+            {
+                var url = source.GetString();
+                if (url != null)
+                {
+                    if (url.StartsWith("https://anidb.net/anime/"))
+                    {
+                        if (int.TryParse(url.AsSpan("https://anidb.net/anime/".Length), out var id))
+                        {
+                            entry.AniDbId = id;
+                        }
+                    }
+                    else if (url.StartsWith("https://myanimelist.net/anime/"))
+                    {
+                        if (int.TryParse(url.AsSpan("https://myanimelist.net/anime/".Length), out var id))
+                        {
+                            entry.MalId = id;
+                        }
+                    }
+                    else if (url.StartsWith("https://anilist.co/anime/"))
+                    {
+                        if (int.TryParse(url.AsSpan("https://anilist.co/anime/".Length), out var id))
+                        {
+                            entry.AniListId = id;
+                        }
+                    }
+                }
+            }
+
+            if (!entry.AniDbId.HasValue && !entry.MalId.HasValue && !entry.AniListId.HasValue)
+            {
+                return;
+            }
+
+            // title
+            if (item.TryGetProperty("title", out var titleProp) && titleProp.ValueKind == JsonValueKind.String)
+            {
+                entry.Title = titleProp.GetString();
+                if (entry.Title != null)
+                {
+                    entry.CleanTitle = entry.Title.CleanForSearch();
+                }
+            }
+
+            // synonyms
+            if (item.TryGetProperty("synonyms", out var synProp) && synProp.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var synElement in synProp.EnumerateArray())
+                {
+                    if (synElement.ValueKind == JsonValueKind.String)
+                    {
+                        var syn = synElement.GetString();
+                        if (syn != null && !SearchCriteriaBase.IsSpacelessSlug(syn))
+                        {
+                            entry.SearchSynonyms.Add(syn);
+                        }
+                    }
+                }
+            }
+
+            // picture (with thumbnail fallback)
+            if (item.TryGetProperty("picture", out var picProp) && picProp.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(picProp.GetString()))
+            {
+                entry.PictureUrl = picProp.GetString();
+            }
+            else if (item.TryGetProperty("thumbnail", out var thumbProp) && thumbProp.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(thumbProp.GetString()))
+            {
+                entry.PictureUrl = thumbProp.GetString();
+            }
+
+            // year
+            if (item.TryGetProperty("animeSeason", out var seasonProp) && seasonProp.ValueKind == JsonValueKind.Object)
+            {
+                if (seasonProp.TryGetProperty("year", out var yearProp) && yearProp.ValueKind == JsonValueKind.Number)
+                {
+                    entry.Year = yearProp.GetInt32();
+                }
+            }
+
+            // genres
+            if (item.TryGetProperty("tags", out var tagsProp) && tagsProp.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var tag in tagsProp.EnumerateArray())
+                {
+                    if (tag.ValueKind == JsonValueKind.String)
+                    {
+                        entry.Genres.Add(tag.GetString());
+                    }
+                }
+            }
+
+            // status
+            if (item.TryGetProperty("status", out var statusProp) && statusProp.ValueKind == JsonValueKind.String)
+            {
+                var statusStr = statusProp.GetString();
+                if (statusStr == "FINISHED")
+                {
+                    entry.Status = SeriesStatusType.Ended;
+                }
+                else if (statusStr == "ONGOING")
+                {
+                    entry.Status = SeriesStatusType.Continuing;
+                }
+                else if (statusStr == "UPCOMING")
+                {
+                    entry.Status = SeriesStatusType.Upcoming;
+                }
+                else
+                {
+                    entry.Status = SeriesStatusType.Continuing;
+                }
+            }
+            else
+            {
+                entry.Status = SeriesStatusType.Continuing;
+            }
+
+            if (entry.AniDbId.HasValue)
+            {
+                if (!titleDict.ContainsKey(entry.AniDbId.Value))
+                {
+                    titleDict[entry.AniDbId.Value] = entry;
+                    titlePriorities[entry.AniDbId.Value] = 2; // Default Manami/Cedya priority
+                }
+            }
+            else
+            {
+                // Index unlinked titles by clean title and synonyms for title-matching AniDB dumps
+                if (!string.IsNullOrWhiteSpace(entry.CleanTitle) && entry.CleanTitle.Length >= 4)
+                {
+                    unlinkedTitles.TryAdd(entry.CleanTitle, entry);
+                }
+
+                foreach (var syn in entry.SearchSynonyms)
+                {
+                    var cleanSyn = syn.CleanForSearch();
+                    if (!string.IsNullOrWhiteSpace(cleanSyn) && cleanSyn.Length >= 4)
+                    {
+                        unlinkedTitles.TryAdd(cleanSyn, entry);
+                    }
+                }
+            }
         }
 
         private static DateTime _lastBackfillTime = DateTime.MinValue;

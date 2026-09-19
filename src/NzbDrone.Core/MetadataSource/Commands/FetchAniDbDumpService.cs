@@ -23,7 +23,7 @@ namespace NzbDrone.Core.MetadataSource.Commands
         {
             var officialDatPath = Path.Combine(_appFolderInfo.AppDataFolder, "anime-titles.dat.gz");
 
-            if (File.Exists(officialDatPath))
+            if (message.Trigger != CommandTrigger.Manual && File.Exists(officialDatPath))
             {
                 var lastModified = File.GetLastWriteTimeUtc(officialDatPath);
                 if (lastModified > DateTime.UtcNow.AddHours(-24))
