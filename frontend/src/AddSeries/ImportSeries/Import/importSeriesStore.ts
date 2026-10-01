@@ -77,6 +77,16 @@ export const updateImportSeriesItem = (
     const existingItem = state.items[itemData.id];
 
     if (existingItem) {
+      const hasChanges = (
+        Object.keys(itemData) as (keyof ImportSeriesItem)[]
+      ).some((key) => existingItem[key] !== itemData[key]);
+
+      // Returning the same state skips notifying subscribers, so a no-op
+      // update can't re-render every row (or feed an effect loop)
+      if (!hasChanges) {
+        return state;
+      }
+
       return {
         items: {
           ...state.items,

@@ -1,4 +1,5 @@
 import { useQueryClient } from '@tanstack/react-query';
+import { useCallback, useMemo } from 'react';
 import AddSeries from 'AddSeries/AddSeries';
 import { AddSeriesOptions } from 'AddSeries/addSeriesOptionsStore';
 import useApiMutation, {
@@ -49,12 +50,18 @@ export const useLookupSeries = (
     },
   });
 
-  const primaryData = resultPrimary.data || [];
-  const anidbData = resultAnidb.data || [];
+  const primaryResultData = resultPrimary.data;
+  const anidbResultData = resultAnidb.data;
 
-  let mergedData = primaryData;
+  // Memoized so consumers that depend on `data` in effects don't loop
+  const mergedData = useMemo(() => {
+    const primaryData = primaryResultData || DEFAULT_SERIES;
+    const anidbData = anidbResultData || DEFAULT_SERIES;
 
-  if (isAll && anidbData.length > 0) {
+    if (!isAll || anidbData.length === 0) {
+      return primaryData;
+    }
+
     const existingIds = new Set(
       primaryData.map((s) => s.tvdbId).filter(Boolean)
     );
@@ -66,19 +73,40 @@ export const useLookupSeries = (
       (s) =>
         !existingIds.has(s.tvdbId) && !existingTitles.has(s.title.toLowerCase())
     );
-    mergedData = [...primaryData, ...uniqueAnidb];
-  }
+
+    return [...primaryData, ...uniqueAnidb];
+  }, [isAll, primaryResultData, anidbResultData]);
 
   const isFetching = isAll
     ? resultPrimary.isFetching || resultAnidb.isFetching
     : resultPrimary.isFetching;
 
-  const error = resultPrimary.error || resultAnidb.error;
+  // In combined mode the lookup isn't done until both providers have answered,
+  // otherwise consumers act on partial (TVDB-only) results
+  const isFetched = isAll
+    ? resultPrimary.isFetched && resultAnidb.isFetched
+    : resultPrimary.isFetched;
+
+  // Only surface an error when nothing usable came back
+  const error =
+    mergedData.length > 0 ? null : resultPrimary.error || resultAnidb.error;
+
+  const { refetch: refetchPrimary } = resultPrimary;
+  const { refetch: refetchAnidb } = resultAnidb;
+
+  const refetch = useCallback(() => {
+    // refetch ignores `enabled`, so only hit AniDB when it's part of the lookup
+    return Promise.all(
+      isAll ? [refetchPrimary(), refetchAnidb()] : [refetchPrimary()]
+    );
+  }, [isAll, refetchPrimary, refetchAnidb]);
 
   return {
     ...resultPrimary,
     isFetching,
+    isFetched,
     error,
+    refetch,
     data: mergedData.length > 0 ? mergedData : DEFAULT_SERIES,
   };
 };
