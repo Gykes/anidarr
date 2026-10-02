@@ -173,3 +173,16 @@ release-artifacts/
 scratch/
 
 ANIDB_INDEXER_ENHANCEMENTS.md
+
+# Scratch files at the repo root (tests, dumps, one-off scripts)
+/*.ps1
+/*.cs
+/*.js
+/*.tsx
+/*.gz
+/*.xml
+/test*
+/*.json
+!/package.json
+!/global.json
+!/tsconfig.json
