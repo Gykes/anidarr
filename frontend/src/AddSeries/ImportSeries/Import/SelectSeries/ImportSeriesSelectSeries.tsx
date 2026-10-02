@@ -19,15 +19,12 @@ import useDebounce from 'Helpers/Hooks/useDebounce';
 import { icons, kinds } from 'Helpers/Props';
 import useExistingSeries from 'Series/useExistingSeries';
 import { InputChanged } from 'typings/inputs';
-import getErrorMessage from 'Utilities/Object/getErrorMessage';
 import translate from 'Utilities/String/translate';
 import {
   addToLookupQueue,
-  removeFromLookupQueue,
   updateImportSeriesItem,
   useImportSeriesItem,
   useIsCurrentedItemQueued,
-  useIsCurrentLookupQueueItem,
 } from '../importSeriesStore';
 import ImportSeriesSearchResult from './ImportSeriesSearchResult';
 import ImportSeriesTitle from './ImportSeriesTitle';
@@ -43,20 +40,29 @@ function ImportSeriesSelectSeries({
   onInputChange,
 }: ImportSeriesSelectSeriesProps) {
   const importSeriesItem = useImportSeriesItem(id);
-  const { selectedSeries, name } = importSeriesItem ?? {};
+  const {
+    selectedSeries,
+    name = '',
+    term: savedTerm,
+    provider,
+    hasSearched,
+    lookupError,
+  } = importSeriesItem ?? {};
+  const searchTerm = savedTerm ?? name;
   // Pass the whole series so AniDB-only matches (no tvdbId) are recognized too
   const isExistingSeries = !!useExistingSeries(selectedSeries);
 
-  const [term, setTerm] = useState(name);
+  // Rows are virtualized and remount on scroll, so the search term lives in the
+  // store; this is only the text box value while typing
+  const [term, setTerm] = useState(searchTerm);
+  const hasTypedRef = useRef(false);
   const [isOpen, setIsOpen] = useState(false);
-  const [provider, setProvider] = useState<string | undefined>(undefined);
   const [contextMenu, setContextMenu] = useState<{
     x: number;
     y: number;
   } | null>(null);
 
   const query = useDebounce(term, term ? 300 : 0);
-  const isCurrentLookupQueueItem = useIsCurrentLookupQueueItem(id);
   const isQueued = useIsCurrentedItemQueued(id);
 
   useEffect(() => {
@@ -74,14 +80,9 @@ function ImportSeriesSelectSeries({
     };
   }, [contextMenu]);
 
-  const { isFetching, isFetched, error, data, refetch } = useLookupSeries(
-    query,
-    provider,
-    isCurrentLookupQueueItem
-  );
-
-  const errorMessage = getErrorMessage(error);
-  const isLookingUpSeries = isFetching || isQueued;
+  // Automatic lookups and series selection are done by ImportSeriesLookupQueue.
+  // This only loads the result list for the dropdown, and only while it's open.
+  const { isFetching, data } = useLookupSeries(searchTerm, provider, isOpen);
 
   const handlePress = useCallback(() => {
     setIsOpen((prevIsOpen) => !prevIsOpen);
@@ -89,23 +90,31 @@ function ImportSeriesSelectSeries({
 
   const handleSearchInputChange = useCallback(
     ({ value }: InputChanged<string>) => {
+      hasTypedRef.current = true;
       setTerm(value);
-      setProvider(undefined);
-      addToLookupQueue(id);
     },
-    [id]
+    []
   );
 
+  useEffect(() => {
+    if (!hasTypedRef.current || !query || query === searchTerm) {
+      return;
+    }
+
+    updateImportSeriesItem({ id, term: query, provider: undefined });
+    addToLookupQueue(id);
+  }, [id, query, searchTerm]);
+
   const handleRefreshPress = useCallback(() => {
-    if (provider === undefined) refetch();
-    else setProvider(undefined);
-  }, [provider, refetch]);
+    updateImportSeriesItem({ id, provider: undefined });
+    addToLookupQueue(id);
+  }, [id]);
 
   const handleAniDbScan = useCallback(() => {
-    if (provider === 'anidb') refetch();
-    else setProvider('anidb');
+    updateImportSeriesItem({ id, provider: 'anidb' });
+    addToLookupQueue(id);
     setContextMenu(null);
-  }, [provider, refetch]);
+  }, [id]);
 
   const handleSeriesSelect = useCallback(
     (index: number) => {
@@ -116,6 +125,7 @@ function ImportSeriesSelectSeries({
       updateImportSeriesItem({
         id,
         selectedSeries,
+        lookupError: undefined,
       });
 
       if (selectedSeries.seriesType !== 'standard') {
@@ -127,36 +137,6 @@ function ImportSeriesSelectSeries({
     },
     [id, data, onInputChange]
   );
-
-  // Rows are virtualized, so this component remounts when scrolled back into
-  // view or when the folder list changes after an import. Lookup results come
-  // straight from the query cache on remount, so without this guard the first
-  // result would overwrite a series the user picked by hand.
-  const alreadyAppliedDataRef = useRef(
-    importSeriesItem?.hasSearched ? data : undefined
-  );
-
-  useEffect(() => {
-    if (!isFetched) {
-      return;
-    }
-
-    removeFromLookupQueue(id);
-
-    if (data === alreadyAppliedDataRef.current) {
-      return;
-    }
-
-    updateImportSeriesItem({
-      id,
-      hasSearched: true,
-      selectedSeries: data[0],
-    });
-  }, [id, isFetched, data]);
-
-  useEffect(() => {
-    setTerm(name);
-  }, [name]);
 
   useEffect(() => {
     const handleGlobalClick = () => setContextMenu(null);
@@ -189,11 +169,11 @@ function ImportSeriesSelectSeries({
     <>
       <div ref={refs.setReference} {...getReferenceProps()}>
         <Link className={styles.button} component="div" onPress={handlePress}>
-          {isLookingUpSeries && isQueued && !isFetched ? (
+          {isQueued ? (
             <LoadingIndicator className={styles.loading} size={20} />
           ) : null}
 
-          {isFetched && selectedSeries && isExistingSeries ? (
+          {!isQueued && selectedSeries && isExistingSeries ? (
             <Icon
               className={styles.warningIcon}
               name={icons.WARNING}
@@ -201,7 +181,7 @@ function ImportSeriesSelectSeries({
             />
           ) : null}
 
-          {isFetched && selectedSeries ? (
+          {!isQueued && selectedSeries ? (
             <ImportSeriesTitle
               title={selectedSeries.title}
               year={selectedSeries.year}
@@ -210,7 +190,7 @@ function ImportSeriesSelectSeries({
             />
           ) : null}
 
-          {isFetched && !selectedSeries ? (
+          {hasSearched && !isQueued && !selectedSeries && !lookupError ? (
             <div>
               <Icon
                 className={styles.warningIcon}
@@ -222,11 +202,11 @@ function ImportSeriesSelectSeries({
             </div>
           ) : null}
 
-          {!isFetching && !!error ? (
+          {!isQueued && !!lookupError ? (
             <div>
               <Icon
                 className={styles.warningIcon}
-                title={errorMessage}
+                title={lookupError}
                 name={icons.WARNING}
                 kind={kinds.WARNING}
               />
@@ -273,7 +253,7 @@ function ImportSeriesSelectSeries({
                       kind={kinds.DEFAULT}
                       spinnerIcon={icons.REFRESH}
                       canSpin={true}
-                      isSpinning={isFetching}
+                      isSpinning={isFetching || isQueued}
                       onPress={handleRefreshPress}
                     >
                       <Icon name={icons.REFRESH} />

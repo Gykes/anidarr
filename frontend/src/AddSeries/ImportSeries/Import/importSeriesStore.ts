@@ -20,6 +20,10 @@ export interface ImportSeriesItem {
   seriesType: SeriesType;
   name: string;
   hasSearched: boolean;
+  // Lookup term and provider; undefined means the folder name / all providers
+  term?: string;
+  provider?: string;
+  lookupError?: string;
 }
 
 interface ImportSeriesState {
@@ -150,8 +154,8 @@ export const removeFromLookupQueue = (id: string) => {
   }));
 };
 
-export const useIsCurrentLookupQueueItem = (id: string) => {
-  return importSeriesStore((state) => state.lookupQueue[0] === id);
+export const useCurrentLookupQueueItemId = () => {
+  return importSeriesStore((state) => state.lookupQueue[0]);
 };
 
 export const useIsCurrentedItemQueued = (id: string) => {
