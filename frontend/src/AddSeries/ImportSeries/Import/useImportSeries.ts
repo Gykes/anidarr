@@ -7,6 +7,20 @@ import {
   removeImportSeriesItemByPath,
 } from './importSeriesStore';
 
+// AniDB-only results have no tvdbId, so comparing tvdbId alone treats every
+// one of them as the same series and only the first would be imported.
+const isSameSeries = (a: Series, b: Series) => {
+  if (a.tvdbId > 0 || b.tvdbId > 0) {
+    return a.tvdbId === b.tvdbId;
+  }
+
+  if ((a.aniDbId ?? 0) > 0 || (b.aniDbId ?? 0) > 0) {
+    return a.aniDbId === b.aniDbId;
+  }
+
+  return false;
+};
+
 export const useImportSeries = () => {
   const queryClient = useQueryClient();
 
@@ -43,7 +57,7 @@ export const useImportSeries = () => {
         // Make sure we have a selected series and the same series hasn't been added yet.
         if (
           selectedSeries &&
-          !acc.some((a) => a.tvdbId === selectedSeries.tvdbId)
+          !acc.some((a) => isSameSeries(a, selectedSeries))
         ) {
           const newSeries: Series = {
             ...selectedSeries,

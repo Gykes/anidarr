@@ -14,6 +14,7 @@ import useRootFolders, { useRootFolder } from 'RootFolder/useRootFolders';
 import { useQualityProfilesData } from 'Settings/Profiles/Quality/useQualityProfiles';
 import translate from 'Utilities/String/translate';
 import ImportSeriesFooter from './ImportSeriesFooter';
+import ImportSeriesLookupQueue from './ImportSeriesLookupQueue';
 import { clearImportSeries } from './importSeriesStore';
 import ImportSeriesTable from './ImportSeriesTable';
 
@@ -80,6 +81,8 @@ function ImportSeries() {
   return (
     <SelectProvider items={items}>
       <PageContent title={translate('ImportSeries')}>
+        <ImportSeriesLookupQueue />
+
         <PageContentBody ref={scrollerRef}>
           {rootFoldersFetching && !rootFoldersFetched ? (
             <LoadingIndicator />
