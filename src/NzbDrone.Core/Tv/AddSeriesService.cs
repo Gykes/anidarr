@@ -103,6 +103,16 @@ namespace NzbDrone.Core.Tv
 
             foreach (var s in newSeries)
             {
+                // Anidarr: TVDB lookups return the library's own record when the series is
+                // already added, so a library import can send one back with its database ID.
+                // Treat that as a duplicate instead of letting the bulk insert throw
+                // "Can't insert model with existing ID != 0" and fail the whole import.
+                if (s.Id > 0)
+                {
+                    _logger.Debug("Series {0} was not added: it is already in the library (id {1})", s, s.Id);
+                    continue;
+                }
+
                 if (s.Path.IsNullOrWhiteSpace())
                 {
                     _logger.Info("Adding Series {0} Root Folder Path: [{1}]", s, s.RootFolderPath);
