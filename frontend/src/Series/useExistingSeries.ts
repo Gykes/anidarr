@@ -11,6 +11,9 @@ function useExistingSeries(seriesToCheck?: Partial<Series>) {
     }
 
     return series.find((s) => {
+      // Lookup results for series already in the library are the library record
+      if (seriesToCheck.id && seriesToCheck.id > 0 && s.id === seriesToCheck.id)
+        return true;
       if (
         seriesToCheck.tvdbId &&
         seriesToCheck.tvdbId > 0 &&

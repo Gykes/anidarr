@@ -86,6 +86,37 @@ namespace NzbDrone.Core.Test.TvTests
             series.Path.Should().Be(Path.Combine(newSeries.RootFolderPath, _fakeSeries.Title));
         }
 
+        [Test]
+        public void should_skip_series_already_in_library_when_importing()
+        {
+            var existingSeries = new Series
+            {
+                Id = 5,
+                TvdbId = 1,
+                RootFolderPath = @"C:\Test\TV"
+            };
+
+            var newSeries = new Series
+            {
+                TvdbId = 2,
+                RootFolderPath = @"C:\Test\TV"
+            };
+
+            GivenValidSeries(newSeries.TvdbId);
+            GivenValidPath();
+
+            Mocker.GetMock<ISeriesService>()
+                  .Setup(s => s.AddSeries(It.IsAny<List<Series>>()))
+                  .Returns<List<Series>>(s => s);
+
+            var added = Subject.AddSeries(new List<Series> { existingSeries, newSeries });
+
+            added.Should().HaveCount(1);
+
+            Mocker.GetMock<IMetadataDispatcher>()
+                  .Verify(s => s.GetSeriesInfo(existingSeries), Times.Never());
+        }
+
         [TestCase(1, 1)] // Adding Season 1 (hub root)
         [TestCase(2, 1)] // Adding Season 2
         [TestCase(3, 1)] // Adding Season 3
