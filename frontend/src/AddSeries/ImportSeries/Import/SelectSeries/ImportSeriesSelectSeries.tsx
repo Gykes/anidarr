@@ -8,7 +8,7 @@ import {
   useInteractions,
 } from '@floating-ui/react';
 /* eslint-disable react/jsx-no-bind */
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useLookupSeries } from 'AddSeries/AddNewSeries/useAddSeries';
 import FormInputButton from 'Components/Form/FormInputButton';
 import TextInput from 'Components/Form/TextInput';
@@ -44,9 +44,8 @@ function ImportSeriesSelectSeries({
 }: ImportSeriesSelectSeriesProps) {
   const importSeriesItem = useImportSeriesItem(id);
   const { selectedSeries, name } = importSeriesItem ?? {};
-  const isExistingSeries = !!useExistingSeries({
-    tvdbId: selectedSeries?.tvdbId,
-  });
+  // Pass the whole series so AniDB-only matches (no tvdbId) are recognized too
+  const isExistingSeries = !!useExistingSeries(selectedSeries);
 
   const [term, setTerm] = useState(name);
   const [isOpen, setIsOpen] = useState(false);
@@ -129,16 +128,30 @@ function ImportSeriesSelectSeries({
     [id, data, onInputChange]
   );
 
-  useEffect(() => {
-    if (isFetched) {
-      updateImportSeriesItem({
-        id,
-        hasSearched: isFetched,
-        selectedSeries: data[0],
-      });
+  // Rows are virtualized, so this component remounts when scrolled back into
+  // view or when the folder list changes after an import. Lookup results come
+  // straight from the query cache on remount, so without this guard the first
+  // result would overwrite a series the user picked by hand.
+  const alreadyAppliedDataRef = useRef(
+    importSeriesItem?.hasSearched ? data : undefined
+  );
 
-      removeFromLookupQueue(id);
+  useEffect(() => {
+    if (!isFetched) {
+      return;
     }
+
+    removeFromLookupQueue(id);
+
+    if (data === alreadyAppliedDataRef.current) {
+      return;
+    }
+
+    updateImportSeriesItem({
+      id,
+      hasSearched: true,
+      selectedSeries: data[0],
+    });
   }, [id, isFetched, data]);
 
   useEffect(() => {

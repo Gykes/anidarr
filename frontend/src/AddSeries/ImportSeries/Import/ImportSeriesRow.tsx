@@ -34,9 +34,8 @@ function ImportSeriesRow({ unmappedFolder }: ImportSeriesRowProps) {
     selectedSeries,
   } = item ?? {};
 
-  const isExistingSeries = !!useExistingSeries({
-    tvdbId: selectedSeries?.tvdbId,
-  });
+  // Pass the whole series so AniDB-only matches (no tvdbId) are recognized too
+  const isExistingSeries = !!useExistingSeries(selectedSeries);
 
   const { getIsSelected, toggleSelected, toggleDisabled } =
     useSelect<ImportSeriesItem>();
